@@ -1,0 +1,22 @@
+{
+  "name": "rspack-swc-loader-benchmark",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "generate": "node bench/generate-fixture.mjs",
+    "verify:versions": "node bench/verify-versions.mjs",
+    "bench": "node bench/benchmark.mjs",
+    "analyze": "node bench/analyze-results.mjs",
+    "bench:quick": "BENCH_MODULES=200 BENCH_WARMUPS=1 BENCH_RUNS=2 node bench/benchmark.mjs"
+  },
+  "devDependencies": {
+    "@rspack/core": "1.7.12",
+    "@swc/core": "1.15.21",
+    "swc-loader": "0.2.7"
+  }
+}
