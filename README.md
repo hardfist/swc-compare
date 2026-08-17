@@ -91,7 +91,7 @@ See [Performance Gap Analysis](docs/performance-gap-analysis.md) for the full ca
 
 ## Reproduction
 
-Requires Node.js 20+ and pnpm 11.19.0:
+Requires Node.js 20+ and pnpm 10.34.5:
 
 ```bash
 pnpm install
@@ -126,4 +126,4 @@ BENCH_FIXTURE=large-file BENCH_LARGE_FILE_BYTES=8388608 BENCH_WARMUPS=2 BENCH_RU
 
 Generated source, bundles, and complete raw samples are stored in `.benchmark-workload/` and are excluded from Git.
 
-GitHub Actions runs both the 500-module and 256 KiB large-file cases on Node.js 20 and 24. Numbers from shared runners are used only to verify version locking, successful builds with both loaders, the result schema, bundle hashes, and runtime checksums; they are not performance gates. Raw results are retained as artifacts for 14 days.
+GitHub Actions runs both the 500-module and 256 KiB large-file cases on Node.js 20 and 24. Numbers from shared runners are used only to verify version locking, successful builds with both loaders, the result schema, bundle hashes, and runtime checksums; they are not performance gates. Timing, RSS, ratios, and correctness details are written to the Job Summary. Raw JSON and the Markdown summary are retained as artifacts for 14 days.
