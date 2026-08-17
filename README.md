@@ -49,6 +49,18 @@
 
 [Rspack 官方架构说明](https://www.rspack.dev/api/javascript-api/architecture)指出 builtin loader 在 Rust 侧运行，可减少 JavaScript 排队和跨语言数据转换，并更充分利用并行能力；本次结果与该机制一致。这里测的是合成 TS 图，绝对数字与加速比例仍会随真实项目的模块大小、插件、磁盘、CPU 和其他构建阶段而变化。
 
+## 为什么 builtin 更快
+
+消融实验支持：本负载的主要差距最可能来自集成路径，而不是 SWC 版本差异。builtin 在 Rspack 的 Rust loader runner 内直接调用 Rust SWC；`swc-loader` 则让每个模块经过 Rspack Rust → Node loader runner → `swc-loader` → `@swc/core` N-API → Node → Rspack Rust。后者会增加每模块的 loader context 构造、源码和结果跨边界传递、options JSON 序列化、Promise/callback 调度，并可能增加 GC 压力。相同 crate 版本仍不保证两个 native binary 的 features、allocator 和构建参数完全相同。
+
+进一步结果：
+
+- 独立的 20 轮、2000 模块消融中，external 的 API 配对差约 58 ms；直接加载与预加载实验共同估计其中约 5–8 ms（10–13%）是首次 `require` 的固定成本。
+- 固定总源码为 875,663 bytes 时，一个 payload 文件加 entry 的常驻耗时几乎相同（81.98 vs 82.00 ms）；拆成 500 个 payload 文件加 entry 后变为 37.36 vs 49.41 ms。高文件数区间的组合增量约为 21–22 µs/payload，说明主要成本随 loader 调用、调度和模块生命周期累计。
+- 在同一组独立消融中，空载首次加载完整 external loader 的固定 RSS 增量约 3.8 MiB，而完整构建相差约 125 MiB。直接 SWC 实验里，一次提交 2001 个异步任务比限制 16 并发多约 33 MiB；这支持排队任务及其结果/Promise 的存活集合可能解释部分内存差距，但不能直接等同于 Rspack 中的归因。
+
+完整调用链、源码依据、消融数据及不能精确归因的部分见[性能差距原因分析](docs/performance-gap-analysis.md)。
+
 ## 复现
 
 要求 Node.js 20+ 和 pnpm 11.19.0：
