@@ -9,10 +9,14 @@
   },
   "scripts": {
     "generate": "node bench/generate-fixture.mjs",
+    "generate:large": "node bench/generate-fixture.mjs --large-file-bytes=1048576",
     "verify:versions": "node bench/verify-versions.mjs",
     "bench": "node bench/benchmark.mjs",
+    "bench:large": "BENCH_FIXTURE=large-file BENCH_LARGE_FILE_BYTES=1048576 node bench/benchmark.mjs",
+    "bench:large:stress": "BENCH_FIXTURE=large-file BENCH_LARGE_FILE_BYTES=4194304 node bench/benchmark.mjs",
     "analyze": "node bench/analyze-results.mjs",
-    "bench:quick": "BENCH_MODULES=200 BENCH_WARMUPS=1 BENCH_RUNS=2 node bench/benchmark.mjs"
+    "bench:quick": "BENCH_MODULES=200 BENCH_WARMUPS=1 BENCH_RUNS=2 node bench/benchmark.mjs",
+    "bench:large:quick": "BENCH_FIXTURE=large-file BENCH_LARGE_FILE_BYTES=262144 BENCH_WARMUPS=1 BENCH_RUNS=2 node bench/benchmark.mjs"
   },
   "devDependencies": {
     "@rspack/core": "1.7.12",

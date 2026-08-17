@@ -12,6 +12,19 @@ const resultsFile = path.join(workloadDirectory, "results.json");
 const analysisFile = path.join(workloadDirectory, "analysis.json");
 const results = JSON.parse(await readFile(resultsFile, "utf8"));
 
+if (results.schemaVersion !== 2) {
+  throw new Error(
+    `Unsupported benchmark result schema ${JSON.stringify(results.schemaVersion)}; expected 2`,
+  );
+}
+if (
+  typeof results.workload?.shapeId !== "string" ||
+  !Number.isSafeInteger(results.workload?.unitCount) ||
+  results.workload.unitCount < 1
+) {
+  throw new Error("Benchmark result is missing valid workload metadata");
+}
+
 function median(values) {
   const sorted = [...values].sort((left, right) => left - right);
   const middle = Math.floor(sorted.length / 2);
@@ -88,7 +101,13 @@ const analysis = Object.fromEntries(
   scenarios.map(([key, section, metric, label], index) => {
     const pairs = pairedSamples(section, metric);
     const ratios = pairs.map((pair) => pair.ratio);
-    const speedup = median(ratios);
+    const externalToBuiltinRatio = median(ratios);
+    const lowerVariant =
+      externalToBuiltinRatio >= 1 ? "builtin" : "external";
+    const lowerValueReductionPercent =
+      lowerVariant === "builtin"
+        ? (1 - 1 / externalToBuiltinRatio) * 100
+        : (1 - externalToBuiltinRatio) * 100;
     return [
       key,
       {
@@ -97,16 +116,19 @@ const analysis = Object.fromEntries(
         builtin: results[section].builtin.metrics[metric],
         external: results[section].external.metrics[metric],
         paired: {
-          speedupMedian: speedup,
-          speedupMad: medianAbsoluteDeviation(ratios),
+          externalToBuiltinRatioMedian: externalToBuiltinRatio,
+          externalToBuiltinRatioMad: medianAbsoluteDeviation(ratios),
           confidence95: bootstrapMedianByPosition(
             pairs,
             0x5f3759df + index * 0x9e3779b9,
           ),
-          builtinReductionPercent: (1 - 1 / speedup) * 100,
+          lowerVariant,
+          lowerValueReductionPercent,
           builtinWinCount: ratios.filter((ratio) => ratio > 1).length,
           pairCount: ratios.length,
-          differenceMedian: median(pairs.map((pair) => pair.difference)),
+          externalMinusBuiltinMedian: median(
+            pairs.map((pair) => pair.difference),
+          ),
         },
       },
     ];
@@ -125,7 +147,7 @@ for (const value of Object.values(analysis)) {
     `  external: ${value.external.median.toFixed(2)} ± ${value.external.medianAbsoluteDeviation.toFixed(2)} ${unit}\n`,
   );
   process.stdout.write(
-    `  paired speedup: ${value.paired.speedupMedian.toFixed(3)}x (95% CI ${value.paired.confidence95.lower.toFixed(3)}–${value.paired.confidence95.upper.toFixed(3)}), ${value.paired.builtinWinCount}/${value.paired.pairCount} builtin wins\n`,
+    `  paired external/builtin ratio: ${value.paired.externalToBuiltinRatioMedian.toFixed(3)}x (95% CI ${value.paired.confidence95.lower.toFixed(3)}–${value.paired.confidence95.upper.toFixed(3)}), ${value.paired.builtinWinCount}/${value.paired.pairCount} builtin wins\n`,
   );
 }
 

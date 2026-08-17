@@ -10,13 +10,14 @@ permissions:
 
 jobs:
   benchmark:
-    name: Node.js ${{ matrix.node-version }}
+    name: Node.js ${{ matrix.node-version }} / ${{ matrix.fixture }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         node-version: [20.x, 24.x]
+        fixture: [many-modules, large-file]
 
     steps:
       - name: Check out repository
@@ -43,7 +44,9 @@ jobs:
       - name: Run benchmark smoke test
         run: pnpm bench
         env:
+          BENCH_FIXTURE: ${{ matrix.fixture }}
           BENCH_MODULES: 500
+          BENCH_LARGE_FILE_BYTES: 262144
           BENCH_WARMUPS: 2
           BENCH_RUNS: 6
 
@@ -54,7 +57,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-node-${{ matrix.node-version }}
+          name: benchmark-${{ matrix.fixture }}-node-${{ matrix.node-version }}
           path: |
             .benchmark-workload/results.json
             .benchmark-workload/analysis.json

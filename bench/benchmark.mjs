@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -10,6 +10,7 @@ import { loaderVariants } from "./config.mjs";
 
 const DEFAULTS = Object.freeze({
   modules: 2_000,
+  largeFileBytes: 1024 * 1024,
   warmups: 5,
   runs: 30,
 });
@@ -18,6 +19,7 @@ const benchmarkDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceDirectory = path.dirname(benchmarkDirectory);
 const workloadDirectory = path.join(workspaceDirectory, ".benchmark-workload");
 const variants = Object.keys(loaderVariants);
+const fixtureKinds = new Set(["many-modules", "large-file"]);
 
 function positiveInteger(name, fallback, { allowZero = false } = {}) {
   const raw = process.env[name];
@@ -31,8 +33,23 @@ function positiveInteger(name, fallback, { allowZero = false } = {}) {
   return value;
 }
 
+const fixture = process.env.BENCH_FIXTURE ?? "many-modules";
+if (!fixtureKinds.has(fixture)) {
+  throw new TypeError(
+    `BENCH_FIXTURE must be one of: ${[...fixtureKinds].join(", ")}`,
+  );
+}
+
 const settings = Object.freeze({
-  modules: positiveInteger("BENCH_MODULES", DEFAULTS.modules),
+  fixture,
+  ...(fixture === "large-file"
+    ? {
+        largeFileBytes: positiveInteger(
+          "BENCH_LARGE_FILE_BYTES",
+          DEFAULTS.largeFileBytes,
+        ),
+      }
+    : { modules: positiveInteger("BENCH_MODULES", DEFAULTS.modules) }),
   warmups: positiveInteger("BENCH_WARMUPS", DEFAULTS.warmups, {
     allowZero: true,
   }),
@@ -167,7 +184,7 @@ function pairedComparison(samples, metric) {
 
   return {
     metric,
-    speedup: summarizeNumbers(ratios),
+    externalToBuiltinRatio: summarizeNumbers(ratios),
     builtinWinCount: ratios.filter((ratio) => ratio > 1).length,
     pairCount: ratios.length,
   };
@@ -237,17 +254,70 @@ async function verifyRuntimeOutput() {
 function comparison(summary, metric) {
   const builtin = summary.builtin.metrics[metric].median;
   const external = summary.external.metrics[metric].median;
+  const externalToBuiltinRatio = external / builtin;
+  const fasterVariant = externalToBuiltinRatio >= 1 ? "builtin" : "external";
+  const fasterMedianReductionPercent =
+    fasterVariant === "builtin"
+      ? (1 - 1 / externalToBuiltinRatio) * 100
+      : (1 - externalToBuiltinRatio) * 100;
   return {
     metric,
     builtinMedian: builtin,
     externalMedian: external,
-    builtinSpeedup: external / builtin,
-    builtinTimeReductionPercent: ((external - builtin) / external) * 100,
+    externalToBuiltinRatio,
+    externalMinusBuiltin: external - builtin,
+    fasterVariant,
+    fasterMedianReductionPercent,
   };
 }
 
 function formatMilliseconds(value) {
   return `${value.toFixed(1)} ms`;
+}
+
+async function describeWorkload() {
+  const metadata = JSON.parse(
+    await readFile(
+      path.join(workloadDirectory, "fixture-metadata.json"),
+      "utf8",
+    ),
+  );
+  if (metadata.kind !== settings.fixture) {
+    throw new Error(
+      `Generated fixture kind ${JSON.stringify(metadata.kind)} does not match ${JSON.stringify(settings.fixture)}`,
+    );
+  }
+
+  if (settings.fixture === "large-file") {
+    const [payload, entry] = await Promise.all([
+      stat(path.join(workloadDirectory, "src", "large-payload.ts")),
+      stat(path.join(workloadDirectory, "src", "index.ts")),
+    ]);
+    if (payload.size !== settings.largeFileBytes) {
+      throw new Error(
+        `Generated payload is ${payload.size} bytes, expected ${settings.largeFileBytes}`,
+      );
+    }
+    return {
+      ...metadata,
+      payloadFiles: 1,
+      totalModules: 2,
+      payloadBytes: payload.size,
+      entryBytes: entry.size,
+      totalSourceBytes: payload.size + entry.size,
+    };
+  }
+
+  if (metadata.unitCount !== settings.modules) {
+    throw new Error(
+      `Generated fixture has ${metadata.unitCount} units, expected ${settings.modules}`,
+    );
+  }
+  return {
+    ...metadata,
+    payloadFiles: settings.modules,
+    totalModules: settings.modules + 1,
+  };
 }
 
 function printComparison(label, summary, metric) {
@@ -260,19 +330,35 @@ function printComparison(label, summary, metric) {
       `${variant.padEnd(23)} ${formatMilliseconds(values.median).padStart(9)} ${formatMilliseconds(values.p95).padStart(9)} ${formatMilliseconds(values.mean).padStart(9)}\n`,
     );
   }
+  const direction =
+    result.fasterVariant === "builtin"
+      ? `builtin median is ${result.fasterMedianReductionPercent.toFixed(1)}% lower`
+      : `external median is ${result.fasterMedianReductionPercent.toFixed(1)}% lower`;
   process.stdout.write(
-    `builtin speedup: ${result.builtinSpeedup.toFixed(2)}x (${result.builtinTimeReductionPercent.toFixed(1)}% less time)\n`,
+    `external/builtin median ratio: ${result.externalToBuiltinRatio.toFixed(2)}x (${direction})\n`,
   );
 }
 
+const workloadDescription =
+  settings.fixture === "large-file"
+    ? `${settings.largeFileBytes}-byte large-file payload`
+    : `${settings.modules} payload modules`;
 process.stdout.write(
-  `Generating ${settings.modules} modules; warmups=${settings.warmups}, measured runs=${settings.runs} per variant\n`,
+  `Generating ${workloadDescription}; warmups=${settings.warmups}, measured runs=${settings.runs} per variant\n`,
 );
-await runProcess([
-  path.join(benchmarkDirectory, "generate-fixture.mjs"),
-  `--modules=${settings.modules}`,
-]);
+await runProcess(
+  settings.fixture === "large-file"
+    ? [
+        path.join(benchmarkDirectory, "generate-fixture.mjs"),
+        `--large-file-bytes=${settings.largeFileBytes}`,
+      ]
+    : [
+        path.join(benchmarkDirectory, "generate-fixture.mjs"),
+        `--modules=${settings.modules}`,
+      ],
+);
 await runProcess([path.join(benchmarkDirectory, "verify-versions.mjs")]);
+const workload = await describeWorkload();
 
 process.stdout.write("Warming cold-process benchmark...\n");
 for (let round = 0; round < settings.warmups; round += 1) {
@@ -318,8 +404,10 @@ const coldSummary = summarize(coldSamples, [
 ]);
 const warmSummary = summarize(warmSamples, ["apiMs", "statsMs"]);
 const results = {
+  schemaVersion: 2,
   generatedAt: new Date().toISOString(),
   settings,
+  workload,
   environment: {
     platform: process.platform,
     architecture: process.arch,

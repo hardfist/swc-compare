@@ -7,9 +7,10 @@
 按证据强度排序：
 
 1. 证据最强的解释是随模块数量累计的 Rust/JS/N-API 边界、loader context、Promise/callback 和数据转换成本。
-2. 异步任务大量排队会增加中间对象存活和峰值 RSS，并可能增加 GC 与调度压力。
-3. `@swc/core` 的首次加载和第二份 native addon 是可测量的固定成本；空载首次加载的即时增量只相当于约一成时间差和约 3% 完整构建 RSS 差，不能代表 addon 在转换期间的全部内存。
-4. 当前关闭 source map 的 fixture 中，input source map 扫描不是主要因素。
+2. 单文件从 64 KiB 增至 8 MiB 时，时间优势从 builtin 约快 11% 逐渐反转为 external 约快 2–5%；这说明边界成本被摊薄后，两份 native binary 的实现与构建差异可以成为主导，不能把所有差距都归为 loader 边界。
+3. 异步任务大量排队会增加多模块场景的中间对象存活和峰值 RSS；单文件场景没有大量 Promise 排队，但 external RSS 仍随 payload 增大得更快，说明跨边界 live set 和 native allocator 高水位还存在独立影响。
+4. `@swc/core` 的首次加载和第二份 native addon 是可测量的固定成本；空载首次加载的即时增量只相当于约一成时间差和约 3% 完整构建 RSS 差，不能代表 addon 在转换期间的全部内存。
+5. 当前关闭 source map 的 fixture 中，input source map 扫描不是主要因素。
 
 不能把剩余时间精确拆成“多少属于 N-API、复制、GC 或 native allocator”：这些工作会重叠运行，V8 profiler 也看不到 native worker 的 CPU。下面的数据用于确定主次关系和量级，而不是宣称一个精确的成本账单。
 
@@ -106,6 +107,30 @@ external - builtin = 0.455 ms + 0.02106 ms × N    R² = 0.9979
 
 固定总量实验中 `N=1/20/100` 各预热 10 轮、测量 50 轮，`N=500` 预热 8 轮、测量 40 轮。
 
+### 单个大文件的尺寸曲线
+
+第三个实验只保留一个 payload 和一个 145-byte entry。payload 将标准多模块 fixture 的 TS 单元直接串接，所有单元都参与 checksum，再用 ASCII 空白精确补齐目标字节数。这样 loader 调用次数固定为一次，但它只代表 `concatenated-standard-units-v1` 这一 generated-code 形态；相同字节数的巨大数组、深嵌套表达式或少量复杂函数会产生不同 AST 和性能。
+
+机器仍为 Apple M3 Max、96 GiB、macOS 26.5.2 arm64；该轮使用 Node.js 24.16.0。
+
+下表的比值均为逐轮配对的 `external / builtin` 中位数。时间比值大于 1 表示 builtin 更快，小于 1 表示 external 更快；RSS 比值大于 1 表示 external 使用更多内存。
+
+| payload | 轮数 | fresh-process 端到端 builtin / external | 时间比值 | 常驻 full build builtin / external | 时间比值 | 峰值 RSS builtin / external | RSS 比值 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 KiB | 40 | 71.64 / 79.49 ms | `1.112x` | 10.68 / 11.31 ms | `1.049x` | 100.23 / 110.16 MiB | `1.099x` |
+| 256 KiB | 40 | 87.57 / 92.75 ms | `1.063x` | 26.79 / 27.18 ms | `1.002x` | 113.70 / 127.74 MiB | `1.121x` |
+| 1 MiB | 25 | 168.24 / 172.54 ms | `1.032x` | 106.52 / 101.43 ms | `0.957x` | 150.30 / 186.50 MiB | `1.251x` |
+| 4 MiB | 12 | 681.78 / 679.78 ms | `0.991x` | 643.40 / 602.22 ms | `0.943x` | 295.65 / 439.48 MiB | `1.488x` |
+| 8 MiB | 8 | 1547.42 / 1511.92 ms | `0.979x` | 1547.38 / 1433.21 ms | `0.948x` | 461.41 / 743.47 MiB | `1.622x` |
+
+各档预热轮数为 8/8/6/3/2，并继续用 AB/BA 顺序交错。64 KiB 的 external fresh-process 中位数多 7.85 ms，和上文首次加载完整 external loader 的 6.16 ms 同量级；到 1 MiB 后，固定成本相对于转换时间已经很小。4 MiB 的 fresh-process 基本持平，8 MiB external 约快 2%；常驻进程从 1 MiB 起 external 约快 4–6%。独立实现的第二套 harness 使用 80-byte entry 和不同 tile 大小，也复现了 64 KiB builtin 较快、256 KiB 常驻持平、4–8 MiB external 略快的方向，降低了结果只由当前生成器偶然形态导致的可能性。
+
+这组时间反转不能精确归因。两边虽然同为 `swc_core 59.0.1`，但 `@swc/core` 预构建 addon 与 Rspack monolithic binding 可能使用不同 features、allocator、LTO、target CPU 和链接方式；builtin 的 `JavaScriptCompiler::transform` 与 `@swc/core` binding 也不是同一个外围调用实现。bundle 字节一致只能证明本 fixture 的最终结果等价，不能证明内部 allocation、diagnostics 或 pass plumbing 相同。external 还承担额外跨边界复制和 source map 扫描，因此观察到它在大 AST 上更快，反而说明某个尚未拆出的 native/compiler 路径差异抵消并超过了边界成本，而不是证明边界没有成本。
+
+内存趋势没有随时间反转：external/builtin RSS 从 `1.10x` 增至 `1.62x`。这与 JS string、N-API input/output、async task 结果和第二份 addon allocator 形成更大的 live set 一致，但 8 MiB 时约 282 MiB 的差值远大于几份源码文本，不能标成某一次复制的大小。因为该场景只有一个 payload，“同时排队 2001 个 Promise”也不是这里的解释。两条 native 路径的 AST/codegen allocation 与 allocator 高水位需要 native heap/profile 才能继续拆分。
+
+每档最终 bundle 的字节 hash 和独立运行时 checksum 都一致。结果记录 payload 精确字节数、shape id、AST 单元数、padding 和 payload SHA-256。fresh process 是新 Node 子进程但不是 cold disk；4/8 MiB 样本较少，常驻轮次又共享同一进程状态，因此这里用于描述曲线和机制边界，不作为共享 CI runner 上的性能门禁。
+
 ### 首次加载只占约一成
 
 全新子进程中交错采样 30 轮，5 轮预热：
@@ -149,6 +174,6 @@ external - builtin = 0.455 ms + 0.02106 ms × N    R² = 0.9979
 
 ## 适用边界
 
-- 模块越碎、loader 链越依赖 JS、source map 越重，builtin 的架构优势通常越容易显现；单个大文件且 SWC 计算占绝对主导时，两者可能接近。
+- 模块越碎、loader 链越依赖 JS、source map 越重，builtin 的架构优势通常越容易显现；单个大文件且 SWC 计算占绝对主导时，两者可能接近，本机 4–8 MiB generated-code stress 中 external 甚至略快，但 RSS 仍明显更高。
 - 相对收益会被其他构建阶段稀释。若项目瓶颈是解析依赖、CSS、压缩、磁盘或插件，本基准的 `1.4–1.5x` 不能直接套用到总构建时间。
 - 相同 `swc_core` crate 版本不代表两个 native binary 的 features、allocator、LTO 和构建参数完全相同。等价输出与消融让集成边界成为当前证据最强的主要解释，但没有证明两个 binary 的纯 native 性能在所有配置下都相同。
