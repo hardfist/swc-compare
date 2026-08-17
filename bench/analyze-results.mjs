@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,6 +10,7 @@ const workloadDirectory = path.join(
 );
 const resultsFile = path.join(workloadDirectory, "results.json");
 const analysisFile = path.join(workloadDirectory, "analysis.json");
+const summaryFile = path.join(workloadDirectory, "summary.md");
 const results = JSON.parse(await readFile(resultsFile, "utf8"));
 
 if (results.schemaVersion !== 2) {
@@ -135,7 +136,62 @@ const analysis = Object.fromEntries(
   }),
 );
 
-await writeFile(analysisFile, `${JSON.stringify(analysis, null, 2)}\n`, "utf8");
+function formatBytes(bytes) {
+  const units = ["bytes", "KiB", "MiB", "GiB"];
+  let value = bytes;
+  let unit = units[0];
+  for (const candidate of units.slice(1)) {
+    if (value < 1024) break;
+    value /= 1024;
+    unit = candidate;
+  }
+  return `${Number.isInteger(value) ? value : value.toFixed(2)} ${unit}`;
+}
+
+function formatWorkload() {
+  if (results.workload.kind === "large-file") {
+    return `${formatBytes(results.workload.payloadBytes)} payload, ${results.workload.unitCount} AST units`;
+  }
+  return `${results.workload.payloadFiles} payload modules`;
+}
+
+function formatMeasurement(value, unit) {
+  return `${value.median.toFixed(2)} ± ${value.medianAbsoluteDeviation.toFixed(2)} ${unit}`;
+}
+
+function createMarkdownSummary() {
+  const rows = Object.values(analysis).map((value) => {
+    const unit = value.metric === "maxRssMiB" ? "MiB" : "ms";
+    const paired = value.paired;
+    return `| ${value.label} | ${formatMeasurement(value.builtin, unit)} | ${formatMeasurement(value.external, unit)} | ${paired.externalToBuiltinRatioMedian.toFixed(3)}x (${paired.confidence95.lower.toFixed(3)}–${paired.confidence95.upper.toFixed(3)}) | ${paired.lowerVariant} lower by ${paired.lowerValueReductionPercent.toFixed(1)}% |`;
+  });
+
+  return `## SWC loader benchmark — ${results.workload.kind}
+
+> Smoke benchmark on a shared runner. Ratios are diagnostic only and are not a performance gate.
+
+| Metric | builtin median ± MAD | external median ± MAD | paired external / builtin (95% CI) | Lower value |
+| --- | ---: | ---: | ---: | ---: |
+${rows.join("\n")}
+
+- Workload: ${formatWorkload()} (${results.workload.shapeId})
+- Sampling: ${results.settings.warmups} warmups, ${results.settings.runs} measured pairs
+- Runtime: ${results.environment.node}, ${results.environment.platform} ${results.environment.architecture}, ${results.environment.logicalCpuCount} logical CPUs
+- Versions: @rspack/core ${results.versions["@rspack/core"]}, @swc/core ${results.versions["@swc/core"]}, swc-loader ${results.versions["swc-loader"]}, swc_core ${results.versions.swc_core}
+- Output: ${formatBytes(results.output.bytes)}, SHA-256 \`${results.output.sha256}\`
+- Runtime checksum: \`${results.output.runtimeChecksum}\` (verified)
+`;
+}
+
+const markdownSummary = createMarkdownSummary();
+await Promise.all([
+  writeFile(analysisFile, `${JSON.stringify(analysis, null, 2)}\n`, "utf8"),
+  writeFile(summaryFile, markdownSummary, "utf8"),
+]);
+
+if (process.env.GITHUB_STEP_SUMMARY) {
+  await appendFile(process.env.GITHUB_STEP_SUMMARY, markdownSummary, "utf8");
+}
 
 for (const value of Object.values(analysis)) {
   const unit = value.metric === "maxRssMiB" ? "MiB" : "ms";
@@ -152,3 +208,4 @@ for (const value of Object.values(analysis)) {
 }
 
 process.stdout.write(`\nAnalysis: ${analysisFile}\n`);
+process.stdout.write(`Summary: ${summaryFile}\n`);

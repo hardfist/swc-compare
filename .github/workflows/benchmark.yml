@@ -26,7 +26,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11.19.0
+          version: 10.34.5
           run_install: false
 
       - name: Set up Node.js
@@ -50,7 +50,7 @@ jobs:
           BENCH_WARMUPS: 2
           BENCH_RUNS: 6
 
-      - name: Analyze benchmark results
+      - name: Analyze results and write job summary
         run: pnpm analyze
 
       - name: Upload benchmark results
@@ -61,5 +61,6 @@ jobs:
           path: |
             .benchmark-workload/results.json
             .benchmark-workload/analysis.json
+            .benchmark-workload/summary.md
           if-no-files-found: ignore
           retention-days: 14
